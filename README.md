@@ -25,10 +25,10 @@ pattern in the ciphertext domain.
 
 This diagram shows how each pixel of a PPM image is encrypted, creating a pattern in the encrypted image:
 
-| |1 | | | 2| | |3 | | | 4 | | | 5 | | | 6 |
-|--|--|
-| Pixels | r | g | b | r | g | b | r | g | b | r | g | b | r | g | b | r
-| Block |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Pixel # |1 | | | 2| | |3 | | | 4 | | | 5 | | | 6 |
+|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|
+| Colour | r | g | b | r | g | b | r | g | b | r | g | b | r | g | b | r |
+| Byte Count | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 |
 
 Each cell represents a byte. Five full pixels can fit into a block, with the last pixel overlapping into the next block.
 
