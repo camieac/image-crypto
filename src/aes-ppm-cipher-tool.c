@@ -1,3 +1,12 @@
+/**
+* @file aes-ppm-cipher-tool.c
+* @author Cameron A. Craig
+* @date 28 Dec 2017
+* @copyright 2017 Cameron A. Craig
+* @brief A tool to encrypt PPM images.
+*        Used to illustrate AES ECB pattern vunerbility.
+* @license GNU GPL v3.0
+*/
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -7,6 +16,13 @@
 #include <sys/socket.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <stdbool.h>
+#include <ctype.h>
+
+// Default key and IV value is all zeros
+static char key[] = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+static char iv[]  = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+static char ppm_filename[] = "image.ppm";
 
 
 // These don't seem to be exported by whatever should be providing them
@@ -18,23 +34,25 @@
 #endif
 
 struct enc_t {
-  int opfd;
-  int tfmfd;
-  	struct sockaddr_alg sa;
-    struct msghdr msg;
-  	struct cmsghdr *cmsg;
-    char cbuf[CMSG_SPACE(4) + CMSG_SPACE(20)];
-    char buf[16];
-  	struct af_alg_iv *iv;
-  	struct iovec iov;
-  	int i;
+	int opfd;
+	int tfmfd;
+	struct sockaddr_alg sa;
+	struct msghdr msg;
+	struct cmsghdr *cmsg;
+	char cbuf[CMSG_SPACE(4) + CMSG_SPACE(20)];
+	char buf[16];
+	struct af_alg_iv *iv;
+	struct iovec iov;
+	int i;
+
+	struct {
+		bool encrypt;
+		bool cbc;
+	} config
 };
 
 int enc_init(struct enc_t *args) {
-  //AF_ALG example
   printf("Checking if AF_ALG is available.\r\n");
-
-  //Check if AF_ALG is available
   int sock;
   if((sock = socket(AF_ALG, SOCK_SEQPACKET, 0)) == -1){
     fprintf(stderr, "Error: %s\r\n", strerror(errno));
@@ -80,13 +98,13 @@ enc_set_key(struct enc_t *args, const char *key) {
 }
 
 enc_enc(struct enc_t *args, char * dst, const char *src) {
-  args->msg.msg_control = args->cbuf;
+	args->msg.msg_control = args->cbuf;
 	args->msg.msg_controllen = sizeof(args->cbuf);
 
-  args->cmsg = CMSG_FIRSTHDR(&args->msg);
-  if(args->cmsg == NULL){
-    fprintf(stderr, "CMSG error\r\n");
-  }
+	args->cmsg = CMSG_FIRSTHDR(&args->msg);
+		if(args->cmsg == NULL){
+	fprintf(stderr, "CMSG error\r\n");
+	}
 
 	args->cmsg->cmsg_level = SOL_ALG;
 	args->cmsg->cmsg_type = ALG_SET_OP;
@@ -94,18 +112,19 @@ enc_enc(struct enc_t *args, char * dst, const char *src) {
 	*(__u32 *)CMSG_DATA(args->cmsg) = ALG_OP_ENCRYPT;
 
 	args->cmsg = CMSG_NXTHDR(&args->msg, args->cmsg);
-  if(args->cmsg == NULL) {
-    fprintf(stderr, "error with cmsg\r\n");
-    exit(0);
-  }
+
+	if(args->cmsg == NULL) {
+		fprintf(stderr, "error with cmsg\r\n");
+		exit(0);
+	}
 
 	args->cmsg->cmsg_level = SOL_ALG;
 	args->cmsg->cmsg_type = ALG_SET_IV;
 	args->cmsg->cmsg_len = CMSG_LEN(20);
 	args->iv = (void *)CMSG_DATA(args->cmsg);
 	args->iv->ivlen = 16;
-	memcpy(args->iv->iv, "\x00\x00\x00\x00\x00\x00\x00\x00"
-		       "\x00\x00\x00\x00\x00\x00\x00\x00", 16);
+
+	memcpy(args->iv->iv, iv, 16);
 
 	args->iov.iov_base = "Single block msg";
 	args->iov.iov_len = 16;
@@ -138,26 +157,87 @@ enc_print(char *data, size_t len){
   printf("\n");
 }
 
-int main(void) {
-  struct enc_t e;
-  char result[16];
-  memset(result, 0x00, 16);
+int main(int argc, char *argv[]) {
+	//We store most things in this struct
+	struct enc_t e;
 
-  char input[16];
-  strncpy(input, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16);
+	/* Read options from the command line */
+	//Encrypt by defualt
+	e.config.encrypt = true;
 
-  const char key[] = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+	// ECB is default
+	e.config.cbc = false;
 
-  if(enc_init(&e) != EXIT_SUCCESS){
-    return EXIT_FAILURE;
-  };
-  enc_set_key(&e, key);
-  enc_enc(&e, result, input);
-  enc_close(&e);
+	int bflag = 0;
+	char *cvalue = NULL;
+	int index;
+
+	int opterr = 0;
+
+	int c;
+	while ((c = getopt (argc, argv, "edk:i:mf:")) != -1) {
+		switch (c) {
+			// Encrypt flag
+			case 'e':
+				e.config.encrypt = true;
+				break;
+			//Decrypt flag
+			case 'd':
+				e.config.encrypt = false;
+				break;
+			//Key (ASCII)
+			case 'k':
+				strncpy(key, optarg, 16);
+				break;
+			//IV
+			case 'i':
+				strncpy(iv, optarg, 16);
+				break;
+			//AES mode (ecb or cbc)
+			case 'm':
+				if(strncmp("cbc", optarg, 3) == 0){
+					e.config.cbc = true;
+				} else if (strncmp("ecb", optarg, 3) == 0) {
+					e.config.cbc = false;
+				} else {
+					printf("Unrecognised AES mode, using ECB.\r\n");
+				}
+			//input PPM file name
+			case 'f':
+				strncpy(ppm_filename, optarg, sizeof(optarg));
+				break;
+			default:
+				printf("Invalid argument given\r\n");
+				abort();
+		}
+	}
+
+	for (index = optind; index < argc; index++) {
+		printf ("Non-option argument %s\n", argv[index]);
+	}
 
 
-  enc_print(input, 16);
-  enc_print(key, 16);
-  enc_print(result, 16);
+	char result[16];
+	memset(result, 0x00, 16);
+
+	char input[16];
+	strncpy(input, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16);
+
+	if(enc_init(&e) != EXIT_SUCCESS) {
+		return EXIT_FAILURE;
+	}
+
+	enc_set_key(&e, key);
+	enc_enc(&e, result, input);
+	enc_close(&e);
+
+	enc_print(input, 16);
+	printf("key: ");
+	enc_print(key, 16);
+
+	printf("iv: ");
+	enc_print(iv, 16);
+
+	enc_print(result, 16);
 
 }

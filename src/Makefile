@@ -1,2 +1,2 @@
 all:
-	gcc -Wall encryption.c -o ppm_pixel_encrypt
+	gcc -Wall aes-ppm-cipher-tool.c -o aes-ppm-cipher-tool
