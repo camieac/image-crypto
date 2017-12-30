@@ -33,6 +33,8 @@ static char ppm_filename[] = "image.ppm";
 #define SOL_ALG 279
 #endif
 
+#define AES_BLOCK_SIZE 16
+
 struct enc_t {
 	int opfd;
 	int tfmfd;
@@ -48,6 +50,9 @@ struct enc_t {
 	struct {
 		bool encrypt;
 		bool cbc;
+		char * filename;
+		int image_width;
+		int image_height;
 	} config
 };
 
@@ -115,7 +120,7 @@ enc_enc(struct enc_t *args, char * dst, const char *src) {
 
 	if(args->cmsg == NULL) {
 		fprintf(stderr, "error with cmsg\r\n");
-		exit(0);
+		exit(EXIT_FAILURE);
 	}
 
 	args->cmsg->cmsg_level = SOL_ALG;
@@ -157,6 +162,55 @@ enc_print(char *data, size_t len){
   printf("\n");
 }
 
+read_file_to_buffer(char * filename, unsigned char **buffer) {
+	if (*buffer != NULL) {
+		printf("error\r\n");
+	}
+
+	printf("Opening file\r\n");
+	FILE *fp = fopen(filename, "r");
+
+	if(fp == NULL) {
+		printf("Failed to open file.\r\n");
+		exit(EXIT_FAILURE);
+	}
+
+	printf("Seeeking to end of file\r\n");
+	if (fseek(fp, 0L, SEEK_END) != 0) {
+		printf("Could not go to end of file.\r\n");
+		exit(EXIT_FAILURE);
+	}
+
+	/* Get the size of the file. */
+	long bufsize = ftell(fp);
+	if (bufsize == -1) { /* Error */ }
+
+	/* Allocate our buffer to that size. */
+	*buffer = malloc(sizeof(char) * (bufsize + 1));
+
+	printf("allocated %ld bytes for ppm file\r\n", bufsize);
+
+	printf("Seeking to start of the file\r\n");
+	if (fseek(fp, 0L, SEEK_SET) != 0) {
+		printf("Failed to seek to start of file\r\n");
+		exit(EXIT_FAILURE);
+	}
+
+	printf("Reading file into memory\r\n");
+	size_t newLen = fread(*buffer, sizeof(char), bufsize, fp);
+	if (ferror(fp) != 0) {
+		printf("Error reading file");
+		exit(EXIT_FAILURE);
+	}
+	// printf("Terminating file\r\n");
+	// buffer[newLen++] = '\0'; /* Just to be safe. */
+
+	printf("Closing file\r\n");
+	fclose(fp);
+
+	//free(buffer); /* Don't forget to call free() later! */
+}
+
 int main(int argc, char *argv[]) {
 	//We store most things in this struct
 	struct enc_t e;
@@ -168,6 +222,9 @@ int main(int argc, char *argv[]) {
 	// ECB is default
 	e.config.cbc = false;
 
+	// clear filename
+	e.config.filename = NULL;
+
 	int bflag = 0;
 	char *cvalue = NULL;
 	int index;
@@ -175,7 +232,7 @@ int main(int argc, char *argv[]) {
 	int opterr = 0;
 
 	int c;
-	while ((c = getopt (argc, argv, "edk:i:mf:")) != -1) {
+	while ((c = getopt (argc, argv, "edk:i:mf:w:h:")) != -1) {
 		switch (c) {
 			// Encrypt flag
 			case 'e':
@@ -204,16 +261,66 @@ int main(int argc, char *argv[]) {
 				}
 			//input PPM file name
 			case 'f':
-				strncpy(ppm_filename, optarg, sizeof(optarg));
+				e.config.filename = malloc(sizeof(optarg));
+				if(e.config.filename == NULL) {
+					printf("Failed to allocate filename.\r\n");
+				}
+				strncpy(e.config.filename, optarg, strlen(optarg));
 				break;
+			//image width and height (TODO: read from PPM)
+			case 'w':
+				e.config.image_width = atoi(optarg);
+				break;
+			case 'h':
+				e.config.image_height = atoi(optarg);
+				break;
+
 			default:
 				printf("Invalid argument given\r\n");
 				abort();
 		}
 	}
 
+	//Make sure we have got valid config
+	if (e.config.filename == NULL) {
+		printf("Please provide an input filename.\r\n");
+		exit(EXIT_FAILURE);
+	}
+
 	for (index = optind; index < argc; index++) {
 		printf ("Non-option argument %s\n", argv[index]);
+	}
+	/* Read in the PPM file */
+	unsigned char * buffer = NULL;
+	//Buffer will return allocated
+	read_file_to_buffer(e.config.filename, &buffer);
+
+	printf("PPM type: %c%c\r\n", buffer[0], buffer[1]);
+
+	/* Constuct a scatter/gather list to encrypt the PPM image
+	   using one block per pixel.
+
+	   Each pixel is (3*8 bits)	3 bytes.
+	   AES Block size is		16 bytes
+	*/
+	int num_pixels = e.config.image_width * e.config.image_height;
+	struct iovec input_iov[num_pixels*2];
+	int p;
+
+	size_t pixel_size = 3;
+	size_t null_padding_size = AES_BLOCK_SIZE - pixel_size;
+
+	unsigned char *null_padding_buffer = malloc(null_padding_size);
+	int offset = 0;
+	for (p = 0; p < (num_pixels*2); p += 2) {
+		//Pixel data
+		input_iov[p].iov_base = buffer + offset;
+		offset += pixel_size;
+		input_iov[p].iov_len = pixel_size;
+
+		//Null padding
+		input_iov[p+1].iov_base = null_padding_buffer;
+		input_iov[p+1].iov_len = null_padding_size;
 	}
 
 
@@ -228,8 +335,6 @@ int main(int argc, char *argv[]) {
 	}
 
 	enc_set_key(&e, key);
-	enc_enc(&e, result, input);
-	enc_close(&e);
 
 	enc_print(input, 16);
 	printf("key: ");
@@ -238,6 +343,18 @@ int main(int argc, char *argv[]) {
 	printf("iv: ");
 	enc_print(iv, 16);
 
+	printf("filename: %s\r\n", e.config.filename);
+
+	printf("width: %d\r\n", e.config.image_width);
+	printf("height: %d\r\n", e.config.image_height);
+	enc_enc(&e, result, input);
+	enc_close(&e);
+
+
+
 	enc_print(result, 16);
+
+	free(buffer);
+	free(null_padding_buffer);
 
 }
