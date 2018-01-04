@@ -5,6 +5,11 @@
 * @copyright 2017 Cameron A. Craig
 * @brief A tool to encrypt PPM images.
 *        Used to illustrate AES ECB pattern vunerbility.
+* @note  This is for illustration purposes only. Data is lost during
+*        the encryption process, making decryption impossible.
+* Example command:
+* ./aes-ppm-cipher-tool -k 0000000000000000 -i 0000000000000000 -f ../img/scotland_20.ppm -w 20 -h 12
+*
 * @license GNU GPL v3.0
 */
 #include <stdio.h>
@@ -102,7 +107,7 @@ enc_set_key(struct enc_t *args, const char *key) {
   };
 }
 
-enc_enc(struct enc_t *args, char * dst, const char *src) {
+enc_enc(struct enc_t *args, char * dst, struct iovec *src_iov, size_t num_iov) {
 	args->msg.msg_control = args->cbuf;
 	args->msg.msg_controllen = sizeof(args->cbuf);
 
@@ -131,16 +136,14 @@ enc_enc(struct enc_t *args, char * dst, const char *src) {
 
 	memcpy(args->iv->iv, iv, 16);
 
-	args->iov.iov_base = "Single block msg";
-	args->iov.iov_len = 16;
+	args->msg.msg_iov = src_iov;
+	args->msg.msg_iovlen = num_iov;
 
-	args->msg.msg_iov = &args->iov;
-	args->msg.msg_iovlen = 1;
-
-  int sent;
-	if((sent = sendmsg(args->opfd, &args->msg, MSG_MORE)) != 16){
-    fprintf(stderr, "Only sent %d bytes!\r\n", sent);
-  }
+	int sent;
+	if((sent = sendmsg(args->opfd, &args->msg, MSG_MORE)) == -1){
+		fprintf(stderr, "Only sent %d bytes!\r\n", sent);
+		fprintf(stderr, "Error: %s\r\n", strerror(errno));
+	}
   int r;
   if((r = read(args->opfd, dst, 16)) != 16){
     fprintf(stderr, "Only read %d bytes!\r\n", r);
@@ -162,13 +165,27 @@ enc_print(char *data, size_t len){
   printf("\n");
 }
 
-read_file_to_buffer(char * filename, unsigned char **buffer) {
+write_buffer_to_file(unsigned char *buffer, size_t len, char *filename) {
+	/* Write your buffer to disk. */
+	FILE *f = fopen(filename,"wb");
+
+	if (f){
+	    fwrite(buffer, len, 1, f);
+	    puts("Wrote to file!");
+	} else {
+	    puts("Something wrong writing to File.");
+	}
+
+	fclose(f);
+}
+
+size_t read_file_to_buffer(char * filename, unsigned char **buffer) {
 	if (*buffer != NULL) {
 		printf("error\r\n");
 	}
 
 	printf("Opening file\r\n");
-	FILE *fp = fopen(filename, "r");
+	FILE *fp = fopen(filename, "rb");
 
 	if(fp == NULL) {
 		printf("Failed to open file.\r\n");
@@ -209,6 +226,7 @@ read_file_to_buffer(char * filename, unsigned char **buffer) {
 	fclose(fp);
 
 	//free(buffer); /* Don't forget to call free() later! */
+	return sizeof(char) * (bufsize + 1);
 }
 
 int main(int argc, char *argv[]) {
@@ -293,7 +311,7 @@ int main(int argc, char *argv[]) {
 	/* Read in the PPM file */
 	unsigned char * buffer = NULL;
 	//Buffer will return allocated
-	read_file_to_buffer(e.config.filename, &buffer);
+	size_t allocated = read_file_to_buffer(e.config.filename, &buffer);
 
 	printf("PPM type: %c%c\r\n", buffer[0], buffer[1]);
 
@@ -347,12 +365,15 @@ int main(int argc, char *argv[]) {
 
 	printf("width: %d\r\n", e.config.image_width);
 	printf("height: %d\r\n", e.config.image_height);
-	enc_enc(&e, result, input);
+	enc_enc(&e, result, input_iov, num_pixels*2);
 	enc_close(&e);
 
 
 
 	enc_print(result, 16);
+
+	char output_filename[] = "out.ppm";
+	write_buffer_to_file(buffer, allocated, output_filename);
 
 	free(buffer);
 	free(null_padding_buffer);
